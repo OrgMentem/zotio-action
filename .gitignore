@@ -1,0 +1,14 @@
+# Local editor and OS files
+.DS_Store
+.idea/
+.vscode/
+
+# Action scratch/output files
+*.log
+coverage/
+dist/
+tmp/
+
+# Local badge artifacts
+bibliography-badge.json
+badge.json

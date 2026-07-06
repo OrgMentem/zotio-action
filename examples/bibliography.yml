@@ -1,0 +1,33 @@
+name: Bibliography health
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  bibliography:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Gate Zotero bibliography
+        uses: OrgMentem/zotio-action@v1
+        with:
+          api-key: ${{ secrets.ZOTERO_API_KEY }}
+          for: citation
+          fail-on: high
+          check-retractions: "true"
+          badge-path: bibliography-badge.json
+          extra-args: --require-fresh 24h
+
+      - name: Upload badge JSON artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bibliography-badge
+          path: bibliography-badge.json

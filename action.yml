@@ -1,0 +1,261 @@
+name: Zotero Library Health
+description: CI for your bibliography
+branding:
+  icon: check-circle
+  color: green
+
+inputs:
+  version:
+    description: Zotio release tag to install, or latest for the newest GitHub release.
+    required: false
+    default: latest
+  for:
+    description: Health preset to run (quick, citation, systematic-review, or all).
+    required: false
+    default: citation
+  fail-on:
+    description: Severity gate passed to zotio library health (critical, high, or any).
+    required: false
+    default: high
+  badge-path:
+    description: Path to write a shields.io endpoint badge JSON file. Empty disables badge output.
+    required: false
+    default: ""
+  check-retractions:
+    description: Run the opt-in retraction health check.
+    required: false
+    default: "false"
+  extra-args:
+    description: Extra shell-style arguments appended to zotio library health.
+    required: false
+    default: ""
+  api-key:
+    description: Zotero Web API key. Required on CI because runners have no Zotero desktop/local API or synced store.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Configure Zotero Web API access
+      shell: bash
+      env:
+        ZOTERO_API_KEY_INPUT: ${{ inputs['api-key'] }}
+      run: |
+        set -euo pipefail
+
+        if command -v python3 >/dev/null 2>&1; then
+          PYTHON=python3
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON=python
+        else
+          echo "::error::python3 (or python) is required to parse Zotero API metadata." >&2
+          exit 9
+        fi
+
+        if [[ -z "${ZOTERO_API_KEY_INPUT}" ]]; then
+          echo "::error::zotio-action requires the api-key input. GitHub-hosted runners do not have Zotero Desktop, localhost:23119, or a pre-synced zotio SQLite store; zotio sync must read your library from the Zotero Web API." >&2
+          echo "Create a Zotero API key with read access at https://www.zotero.org/settings/keys and pass it as api-key: \${{ secrets.ZOTERO_API_KEY }}." >&2
+          exit 9
+        fi
+
+        case "${ZOTERO_API_KEY_INPUT}" in
+          *$'\n'*|*$'\r'*)
+            echo "::error::api-key must be a single-line Zotero Web API key." >&2
+            exit 10
+            ;;
+        esac
+
+        echo "::add-mask::${ZOTERO_API_KEY_INPUT}"
+        printf 'ZOTERO_API_KEY=%s\n' "${ZOTERO_API_KEY_INPUT}" >> "${GITHUB_ENV}"
+
+        key_json="${RUNNER_TEMP}/zotio-key-current.json"
+        http_status="$({ curl -sS -w '%{http_code}' -o "${key_json}" -H "Zotero-API-Key: ${ZOTERO_API_KEY_INPUT}" -H 'Accept: application/json' https://api.zotero.org/keys/current || true; })"
+        if [[ "${http_status}" != "200" ]]; then
+          echo "::error::Could not verify the Zotero API key with https://api.zotero.org/keys/current (HTTP ${http_status}). Ensure api-key is valid and has read access to the target personal or group library." >&2
+          exit 5
+        fi
+
+        user_id="$(${PYTHON} - "${key_json}" <<'PY'
+        import json
+        import sys
+
+        with open(sys.argv[1], "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        user_id = payload.get("userID")
+        if user_id in (None, ""):
+            raise SystemExit("keys/current response did not include userID")
+        print(user_id)
+        PY
+        )"
+
+        printf 'ZOTERO_BASE_URL=https://api.zotero.org/users/%s\n' "${user_id}" >> "${GITHUB_ENV}"
+        echo "Configured zotio to sync via the Zotero Web API for user ${user_id}."
+
+    - name: Install zotio
+      shell: bash
+      env:
+        VERSION_INPUT: ${{ inputs.version }}
+      run: |
+        set -euo pipefail
+
+        if command -v python3 >/dev/null 2>&1; then
+          PYTHON=python3
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON=python
+        else
+          echo "::error::python3 (or python) is required to parse GitHub release metadata." >&2
+          exit 9
+        fi
+
+        case "${RUNNER_OS}" in
+          Linux) goos=linux ;;
+          macOS) goos=darwin ;;
+          Windows) goos=windows ;;
+          *)
+            echo "::error::Unsupported runner OS: ${RUNNER_OS}. zotio releases are built for Linux, macOS, and Windows." >&2
+            exit 9
+            ;;
+        esac
+
+        case "${RUNNER_ARCH}" in
+          X64) goarch=amd64 ;;
+          ARM64) goarch=arm64 ;;
+          *)
+            echo "::error::Unsupported runner architecture: ${RUNNER_ARCH}. zotio releases are built for amd64 and arm64." >&2
+            exit 9
+            ;;
+        esac
+
+        version="${VERSION_INPUT}"
+        if [[ "${version}" == "latest" ]]; then
+          latest_json="${RUNNER_TEMP}/zotio-release-latest.json"
+          http_status="$({ curl -sS -w '%{http_code}' -o "${latest_json}" -H 'Accept: application/vnd.github+json' https://api.github.com/repos/OrgMentem/zotio/releases/latest || true; })"
+          if [[ "${http_status}" != "200" ]]; then
+            echo "::error::Could not resolve the latest zotio release from the GitHub API (HTTP ${http_status})." >&2
+            exit 5
+          fi
+          version="$(${PYTHON} - "${latest_json}" <<'PY'
+        import json
+        import sys
+
+        with open(sys.argv[1], "r", encoding="utf-8") as fh:
+            payload = json.load(fh)
+        tag = payload.get("tag_name")
+        if not tag:
+            raise SystemExit("release response did not include tag_name")
+        print(tag)
+        PY
+        )"
+        fi
+
+        if [[ "${goos}" == "windows" ]]; then
+          ext=zip
+        else
+          ext=tar.gz
+        fi
+
+        # goreleaser's {{ .Version }} strips the leading v from the tag
+        # (tag v0.1.0 -> zotio_0.1.0_linux_amd64.tar.gz); the release URL
+        # path keeps the full tag.
+        archive_version="${version#v}"
+        archive="zotio_${archive_version}_${goos}_${goarch}.${ext}"
+        url="https://github.com/OrgMentem/zotio/releases/download/${version}/${archive}"
+        tool_dir="${RUNNER_TOOL_CACHE:-${RUNNER_TEMP}}/zotio/${version}/${goos}-${goarch}"
+        archive_path="${RUNNER_TEMP}/${archive}"
+
+        rm -rf "${tool_dir}"
+        mkdir -p "${tool_dir}"
+        echo "Downloading ${archive} from ${url}."
+        curl -fsSL "${url}" -o "${archive_path}"
+
+        if [[ "${ext}" == "zip" ]]; then
+          unzip -q "${archive_path}" -d "${tool_dir}"
+        else
+          tar -xzf "${archive_path}" -C "${tool_dir}"
+        fi
+
+        chmod +x "${tool_dir}"/zotio* 2>/dev/null || true
+        echo "${tool_dir}" >> "${GITHUB_PATH}"
+        echo "Installed zotio ${version} for ${goos}/${goarch}."
+
+    - name: Sync Zotero library
+      shell: bash
+      env:
+        ZOTERO_API_KEY: ${{ inputs['api-key'] }}
+      run: |
+        set -euo pipefail
+        zotio sync
+
+    - name: Run library health gate
+      shell: bash
+      env:
+        ZOTERO_API_KEY: ${{ inputs['api-key'] }}
+        ZOTIO_HEALTH_FOR: ${{ inputs['for'] }}
+        ZOTIO_FAIL_ON: ${{ inputs['fail-on'] }}
+        ZOTIO_BADGE_PATH: ${{ inputs['badge-path'] }}
+        ZOTIO_CHECK_RETRACTIONS: ${{ inputs['check-retractions'] }}
+        ZOTIO_EXTRA_ARGS: ${{ inputs['extra-args'] }}
+      run: |
+        set -euo pipefail
+
+        if command -v python3 >/dev/null 2>&1; then
+          PYTHON=python3
+        elif command -v python >/dev/null 2>&1; then
+          PYTHON=python
+        else
+          echo "::error::python3 (or python) is required to parse extra-args." >&2
+          exit 9
+        fi
+
+        health_args=(library health --for "${ZOTIO_HEALTH_FOR}" --fail-on "${ZOTIO_FAIL_ON}")
+
+        check_retractions="$(printf '%s' "${ZOTIO_CHECK_RETRACTIONS}" | tr '[:upper:]' '[:lower:]')"
+        case "${check_retractions}" in
+          true) health_args+=(--check-retractions) ;;
+          false|"") ;;
+          *)
+            echo "::error::check-retractions must be 'true' or 'false', got '${ZOTIO_CHECK_RETRACTIONS}'." >&2
+            exit 2
+            ;;
+        esac
+
+        extra_args=()
+        if [[ -n "${ZOTIO_EXTRA_ARGS}" ]]; then
+          extra_file="${RUNNER_TEMP}/zotio-extra-args.bin"
+          if ! "${PYTHON}" - "${extra_file}" <<'PY'
+        import os
+        import shlex
+        import sys
+
+        output_path = sys.argv[1]
+        try:
+            args = shlex.split(os.environ["ZOTIO_EXTRA_ARGS"])
+        except ValueError as exc:
+            print(f"invalid extra-args: {exc}", file=sys.stderr)
+            raise SystemExit(2)
+        with open(output_path, "wb") as fh:
+            for arg in args:
+                fh.write(arg.encode("utf-8") + b"\0")
+        PY
+          then
+            echo "::error::Could not parse extra-args. Use shell-style quoting, for example: --require-fresh 24h --limit 20" >&2
+            exit 2
+          fi
+          while IFS= read -r -d '' arg; do
+            extra_args+=("${arg}")
+          done < "${extra_file}"
+        fi
+
+        if [[ -n "${ZOTIO_BADGE_PATH}" ]]; then
+          mkdir -p "$(dirname "${ZOTIO_BADGE_PATH}")"
+          if zotio "${health_args[@]}" --badge "${extra_args[@]}" > "${ZOTIO_BADGE_PATH}"; then
+            status=0
+          else
+            status=$?
+          fi
+          echo "Wrote shields.io endpoint badge JSON to ${ZOTIO_BADGE_PATH}."
+          exit "${status}"
+        fi
+
+        zotio "${health_args[@]}" "${extra_args[@]}"
