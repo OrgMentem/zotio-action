@@ -55,7 +55,7 @@ runs:
 
         if [[ -z "${ZOTERO_API_KEY_INPUT}" ]]; then
           echo "::error::zotio-action requires the api-key input. GitHub-hosted runners do not have Zotero Desktop, localhost:23119, or a pre-synced zotio SQLite store; zotio sync must read your library from the Zotero Web API." >&2
-          echo "Create a Zotero API key with read access at https://www.zotero.org/settings/keys and pass it as api-key: \${{ secrets.ZOTERO_API_KEY }}." >&2
+          echo "Create a Zotero API key with read access at https://www.zotero.org/settings/keys, store it as a repository secret named ZOTERO_API_KEY, and pass it to this action as the api-key input." >&2
           exit 9
         fi
 
