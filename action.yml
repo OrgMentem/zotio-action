@@ -1,4 +1,4 @@
-name: zotio Bibliography Health for Zotero
+name: "zotio: bibliography health for Zotero"
 description: CI for your bibliography — gate builds on Zotero library health, powered by zotio
 branding:
   icon: check-circle

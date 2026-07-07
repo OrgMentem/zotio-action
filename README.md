@@ -6,7 +6,7 @@
   </picture>
 </p>
 
-# Bibliography Health for Zotero
+# Bibliography health for Zotero
 
 CI for your bibliography, powered by [zotio](https://github.com/OrgMentem/zotio). This composite action installs `zotio`, syncs your Zotero library from the Zotero Web API, and runs `zotio library health` as a quality gate for a paper, thesis, dissertation, or review repository.
 
