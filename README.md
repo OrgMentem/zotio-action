@@ -1,6 +1,14 @@
-# Zotero Library Health Action
+<p align="center">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/OrgMentem/zotio/main/docs/assets/logo-wordmark-dark.svg">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/OrgMentem/zotio/main/docs/assets/logo-wordmark.svg">
+    <img alt="zotio" src="https://raw.githubusercontent.com/OrgMentem/zotio/main/docs/assets/logo-wordmark.svg" width="180">
+  </picture>
+</p>
 
-CI for your bibliography. This composite action installs `zotio`, syncs your Zotero library from the Zotero Web API, and runs `zotio library health` as a quality gate for a paper, thesis, dissertation, or review repository.
+# Bibliography Health for Zotero
+
+CI for your bibliography, powered by [zotio](https://github.com/OrgMentem/zotio). This composite action installs `zotio`, syncs your Zotero library from the Zotero Web API, and runs `zotio library health` as a quality gate for a paper, thesis, dissertation, or review repository.
 
 ```yaml
 - uses: OrgMentem/zotio-action@v1
@@ -119,3 +127,7 @@ The release archives also include `zotio-mcp`, but the action only invokes the `
 ## License
 
 MIT. See [LICENSE](LICENSE).
+
+---
+
+Zotero is a registered trademark of the [Corporation for Digital Scholarship](https://digitalscholar.org/). zotio and this action are independent projects and are not affiliated with or endorsed by Zotero or the Corporation for Digital Scholarship.

@@ -1,5 +1,5 @@
-name: Zotero Library Health
-description: CI for your bibliography
+name: zotio Bibliography Health for Zotero
+description: CI for your bibliography — gate builds on Zotero library health, powered by zotio
 branding:
   icon: check-circle
   color: green
