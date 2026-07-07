@@ -6,7 +6,7 @@ branding:
 
 inputs:
   version:
-    description: Zotio release tag to install, or latest for the newest GitHub release.
+    description: zotio release tag to install, or latest for the newest GitHub release.
     required: false
     default: latest
   for:

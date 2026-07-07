@@ -90,7 +90,7 @@ Example endpoint URL after publishing `bibliography-badge.json` to GitHub Pages:
 
 | Input | Default | Description |
 |---|---:|---|
-| `version` | `latest` | Zotio release tag to install. `latest` resolves `https://api.github.com/repos/OrgMentem/zotio/releases/latest`. Non-latest values must match a release tag, for example `v1.2.3`. |
+| `version` | `latest` | zotio release tag to install. `latest` resolves `https://api.github.com/repos/OrgMentem/zotio/releases/latest`. Non-latest values must match a release tag, for example `v1.2.3`. |
 | `for` | `citation` | Health preset passed to `zotio library health --for`: `quick`, `citation`, `systematic-review`, or `all`. |
 | `fail-on` | `high` | Gate threshold passed to `zotio library health --fail-on`: `critical`, `high`, or `any`. |
 | `badge-path` | empty | Path where a shields.io endpoint badge JSON should be written. Empty disables badge output. |
