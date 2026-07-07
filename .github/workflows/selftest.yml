@@ -24,6 +24,8 @@ jobs:
           api-key: ${{ secrets.ZOTERO_API_KEY }}
           for: citation
           fail-on: critical
+          check-retractions: "true"
+          extra-args: "--limit 40"
           badge-path: badge.json
 
       - name: Show badge JSON
