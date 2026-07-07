@@ -4,6 +4,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * *"   # your library drifts outside git — check daily
 
 permissions:
   contents: read

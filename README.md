@@ -18,17 +18,47 @@ CI for your bibliography, powered by [zotio](https://github.com/OrgMentem/zotio)
     fail-on: high
 ```
 
-## Important CI authentication limitation
+## What you get
 
-GitHub-hosted runners do **not** have Zotero Desktop, the local Zotero API at `localhost:23119`, or an already-synced `zotio` SQLite store. A keyless desktop run can work on your own machine, but it cannot work on a clean CI runner.
+- **A real quality gate, not a report.** Deterministic exit codes (`0` pass · `11` findings at your threshold · `12` stale data · `9` setup) — the job fails when your bibliography isn't fit to cite.
+- **Retraction checking.** `check-retractions: "true"` probes Crossref's Retraction Watch data and fails the build the day a cited paper is retracted.
+- **A badge that never lies.** `badge-path` writes shields.io endpoint JSON *before* the gate exits — a failing gate still publishes a truthful red badge, never a stale green one.
+- **Readable failures.** Every run writes a verdict table to the job's step summary; `exit-code`/`message`/`color` outputs let downstream steps post PR comments or publish the badge.
+- **Presets that match how researchers work.** `--for citation` (submission-ready), `systematic-review` (screening integrity), `quick`, `all`; `extra-args` passes anything else (`--require-fresh 24h`, `--limit 20`).
+- **No Docker, no toolchain.** Composite action; installs a signed release binary on Linux, macOS, or Windows runners in seconds. Key verified up front and masked in logs — a read-only Zotero key is all it needs.
 
-For CI, `api-key` is effectively required. The action fails fast with exit `9` when it is missing. When present, the action:
+## Run it on a schedule — your library drifts outside git
+
+A normal CI gate runs when the *repo* changes. But your Zotero library changes when you import a paper on a Tuesday night — no push, no PR, no trigger. Add a cron so drift is caught within a day, not at submission time:
+
+```yaml
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    - cron: "0 6 * * *"   # daily: catch library drift and fresh retractions
+```
+
+This also re-checks retractions daily — papers get retracted on their own schedule, not yours.
+
+## Fail the build on a retracted citation
+
+<p align="center">
+  <img src="https://raw.githubusercontent.com/OrgMentem/zotio/main/docs/assets/demos/retract-check.gif" alt="zotio catching a genuinely retracted paper via Crossref's Retraction Watch data" width="700">
+</p>
+
+With `check-retractions: "true"`, the health gate probes every DOI-bearing item against Crossref's Retraction Watch metadata (retractions, expressions of concern, corrections) as a critical finding — the exact failure mode that ends careers when a reviewer finds it first.
+
+## CI authentication
+
+GitHub-hosted runners do **not** have Zotero Desktop, the local Zotero API at `localhost:23119`, or an already-synced `zotio` SQLite store — so for CI, `api-key` is effectively required. The action fails fast with exit `9` when it is missing. When present, the action:
 
 1. Masks and exports the key as `ZOTERO_API_KEY` for both `zotio sync` and `zotio library health`.
 2. Calls `https://api.zotero.org/keys/current` to verify the key and resolve your numeric Zotero user ID.
-3. Exports `ZOTERO_BASE_URL=https://api.zotero.org/users/<userID>` so `zotio sync` reads from the Web API instead of trying the unavailable local desktop API.
+3. Exports `ZOTERO_BASE_URL=https://api.zotero.org/users/<userID>` so `zotio sync` reads from the Web API.
 
-Create a key at <https://www.zotero.org/settings/keys> with read access to the library you want to gate. For group libraries, set `ZOTERO_GROUP` in the workflow environment to the numeric group ID; the key must have read access to that group.
+Create a key at <https://www.zotero.org/settings/keys> — **read access is sufficient**; the action never writes to your library. For group libraries, set `ZOTERO_GROUP` in the workflow environment to the numeric group ID (the key must have read access to that group). Fork PRs cannot read your secret: GitHub withholds secrets from fork-triggered runs by default.
 
 ## Complete thesis workflow
 
@@ -39,6 +69,8 @@ on:
   pull_request:
   push:
     branches: [main]
+  schedule:
+    - cron: "0 6 * * *"   # your library drifts outside git — check daily
 
 permissions:
   contents: read
@@ -55,6 +87,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Check Zotero library health
+        id: health
         uses: OrgMentem/zotio-action@v1
         with:
           api-key: ${{ secrets.ZOTERO_API_KEY }}
@@ -70,6 +103,10 @@ jobs:
         with:
           name: bibliography-badge
           path: bibliography-badge.json
+
+      - name: React to the verdict (optional)
+        if: always()
+        run: echo "gate=${{ steps.health.outputs.exit-code }} verdict='${{ steps.health.outputs.message }}' color=${{ steps.health.outputs.color }}"
 ```
 
 The checkout step is not required by `zotio` itself, but it keeps this workflow ready for thesis repositories where later jobs build the manuscript.
@@ -84,7 +121,7 @@ Example endpoint URL after publishing `bibliography-badge.json` to GitHub Pages:
 ![bibliography](https://img.shields.io/endpoint?url=https://<owner>.github.io/<repo>/bibliography-badge.json)
 ```
 
-`zotio library health --badge` already emits JSON, so the action never combines badge mode with `--json`.
+The badge is written **before** the gate exits, so a failing run still publishes a truthful red badge — never a stale green one. (`zotio library health --badge` already emits JSON, so the action never combines badge mode with `--json`.)
 
 ## Inputs
 
@@ -97,6 +134,16 @@ Example endpoint URL after publishing `bibliography-badge.json` to GitHub Pages:
 | `check-retractions` | `false` | When `true`, passes `--check-retractions` to the health command. |
 | `extra-args` | empty | Extra shell-style arguments appended to `zotio library health`, such as `--require-fresh 24h --limit 20`. |
 | `api-key` | empty | Zotero Web API key. Required on CI because there is no Zotero Desktop/local API or synced store on the runner. Exported as `ZOTERO_API_KEY` for sync and health. |
+
+## Outputs
+
+| Output | Description |
+|---|---|
+| `exit-code` | Health gate exit code (`0`, `9`, `11`, `12`). |
+| `message` | Badge message, e.g. `healthy` or `2 critical, 5 high` (empty unless `badge-path` is set). |
+| `color` | Badge color keyword, e.g. `brightgreen`, `yellow`, `red` (empty unless `badge-path` is set). |
+
+Every run also writes a verdict table to the job's **step summary**, so failures are readable at a glance in the Actions UI.
 
 ## Exit codes
 

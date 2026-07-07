@@ -34,6 +34,16 @@ inputs:
     required: false
     default: ""
 
+outputs:
+  exit-code:
+    description: Health gate exit code (0 pass, 9 setup, 11 quality gate failed, 12 freshness failed).
+    value: ${{ steps.gate.outputs.exit-code }}
+  message:
+    description: Badge message, e.g. "healthy" or "3 high" (empty unless badge-path is set).
+    value: ${{ steps.gate.outputs.message }}
+  color:
+    description: Badge color keyword (empty unless badge-path is set).
+    value: ${{ steps.gate.outputs.color }}
 runs:
   using: composite
   steps:
@@ -188,6 +198,7 @@ runs:
         zotio sync
 
     - name: Run library health gate
+      id: gate
       shell: bash
       env:
         ZOTERO_API_KEY: ${{ inputs['api-key'] }}
@@ -247,15 +258,48 @@ runs:
           done < "${extra_file}"
         fi
 
+        status=0
         if [[ -n "${ZOTIO_BADGE_PATH}" ]]; then
           mkdir -p "$(dirname "${ZOTIO_BADGE_PATH}")"
-          if zotio "${health_args[@]}" --badge "${extra_args[@]}" > "${ZOTIO_BADGE_PATH}"; then
-            status=0
-          else
-            status=$?
-          fi
+          zotio "${health_args[@]}" --badge "${extra_args[@]}" > "${ZOTIO_BADGE_PATH}" || status=$?
           echo "Wrote shields.io endpoint badge JSON to ${ZOTIO_BADGE_PATH}."
-          exit "${status}"
+        else
+          zotio "${health_args[@]}" "${extra_args[@]}" || status=$?
         fi
 
-        zotio "${health_args[@]}" "${extra_args[@]}"
+        message=""
+        color=""
+        if [[ -n "${ZOTIO_BADGE_PATH}" && -s "${ZOTIO_BADGE_PATH}" ]]; then
+          message="$("${PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("message",""))' "${ZOTIO_BADGE_PATH}" 2>/dev/null || true)"
+          color="$("${PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("color",""))' "${ZOTIO_BADGE_PATH}" 2>/dev/null || true)"
+        fi
+
+        {
+          echo "exit-code=${status}"
+          echo "message=${message}"
+          echo "color=${color}"
+        } >> "${GITHUB_OUTPUT}"
+
+        case "${status}" in
+          0)  verdict="passed" ;;
+          9)  verdict="setup required (exit 9)" ;;
+          11) verdict="FAILED — findings at or above the threshold (exit 11)" ;;
+          12) verdict="FAILED — library data too stale (exit 12)" ;;
+          *)  verdict="FAILED (exit ${status})" ;;
+        esac
+        {
+          echo "## Bibliography health: ${verdict}"
+          echo
+          echo "| | |"
+          echo "|---|---|"
+          echo "| Preset | \`${ZOTIO_HEALTH_FOR}\` |"
+          echo "| Gate | \`--fail-on ${ZOTIO_FAIL_ON}\` |"
+          echo "| Retraction check | \`${check_retractions:-false}\` |"
+          if [[ -n "${message}" ]]; then
+            echo "| Verdict | ${message} |"
+          fi
+          echo
+          echo "Reproduce locally: \`zotio library health --for ${ZOTIO_HEALTH_FOR} --fail-on ${ZOTIO_FAIL_ON}\` — [docs](https://orgmentem.github.io/zotio/guide/ci/)"
+        } >> "${GITHUB_STEP_SUMMARY}"
+
+        exit "${status}"

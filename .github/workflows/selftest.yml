@@ -28,9 +28,15 @@ jobs:
           extra-args: "--limit 40"
           badge-path: badge.json
 
-      - name: Show badge JSON
+      - name: Show badge JSON and outputs
         if: always()
-        run: cat badge.json || echo "no badge written"
+        run: |
+          cat badge.json || echo "no badge written"
+          echo "outputs: exit-code=${{ steps.health.outputs.exit-code }} message='${{ steps.health.outputs.message }}' color=${{ steps.health.outputs.color }}"
+          if [ -z "${{ steps.health.outputs.message }}" ]; then
+            echo "expected a non-empty message output" >&2
+            exit 1
+          fi
 
   missing-key:
     name: Fails fast without api-key
