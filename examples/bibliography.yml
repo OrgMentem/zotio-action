@@ -9,7 +9,7 @@ on:
 
 permissions:
   contents: read
-
+  issues: write
 jobs:
   bibliography:
     runs-on: ubuntu-latest
@@ -22,8 +22,11 @@ jobs:
         with:
           api-key: ${{ secrets.ZOTERO_API_KEY }}
           for: citation
-          fail-on: high
+          fail-on: none
+          fail-on-new: high
+          baseline: "true"
           check-retractions: "true"
+          open-issue-on: retraction
           badge-path: bibliography-badge.json
           extra-args: --require-fresh 24h
 

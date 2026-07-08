@@ -23,7 +23,9 @@ jobs:
         with:
           api-key: ${{ secrets.ZOTERO_API_KEY }}
           for: citation
-          fail-on: critical
+          fail-on: none
+          fail-on-new: critical
+          baseline: "true"
           check-retractions: "true"
           extra-args: "--limit 40"
           badge-path: badge.json
@@ -32,9 +34,13 @@ jobs:
         if: always()
         run: |
           cat badge.json || echo "no badge written"
-          echo "outputs: exit-code=${{ steps.health.outputs.exit-code }} message='${{ steps.health.outputs.message }}' color=${{ steps.health.outputs.color }}"
+          echo "outputs: exit-code=${{ steps.health.outputs.exit-code }} new-findings=${{ steps.health.outputs.new-findings }} message='${{ steps.health.outputs.message }}' color=${{ steps.health.outputs.color }}"
           if [ -z "${{ steps.health.outputs.message }}" ]; then
             echo "expected a non-empty message output" >&2
+            exit 1
+          fi
+          if [ -z "${{ steps.health.outputs.new-findings }}" ]; then
+            echo "expected a non-empty new-findings output" >&2
             exit 1
           fi
 
