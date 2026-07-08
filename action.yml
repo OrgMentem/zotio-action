@@ -287,7 +287,17 @@ runs:
           exit 0
         fi
 
-        health_args=(library health --for "${ZOTIO_HEALTH_FOR}" --fail-on "${ZOTIO_FAIL_ON}" --report "${report_path}")
+        # Older zotio releases (< 0.3.0) lack --report/--baseline/--fail-on-new.
+        # Probe the installed binary so default runs stay compatible with a
+        # pinned older version; baseline features on an old binary fail loudly.
+        report_supported=0
+        if zotio library health --help 2>/dev/null | grep -q -- '--report'; then
+          report_supported=1
+        fi
+        health_args=(library health --for "${ZOTIO_HEALTH_FOR}" --fail-on "${ZOTIO_FAIL_ON}")
+        if [[ "${report_supported}" == "1" ]]; then
+          health_args+=(--report "${report_path}")
+        fi
         health_status=0
         bibcheck_status=0
         input_error=""
@@ -317,11 +327,18 @@ runs:
         if [[ -n "${ZOTIO_FAIL_ON_NEW}" ]]; then
           baseline_mode=true
         fi
-        if [[ "${baseline_mode}" == "true" ]]; then
+        if [[ "${baseline_mode}" == "true" || -n "${ZOTIO_FAIL_ON_NEW}" ]]; then
+          if [[ "${report_supported}" != "1" ]]; then
+            echo "::error::baseline/fail-on-new require zotio >= 0.3.0 (installed version lacks --baseline); pin version: latest or a newer tag." >&2
+            health_status=2
+            input_error=1
+          fi
+        fi
+        if [[ "${baseline_mode}" == "true" && "${report_supported}" == "1" ]]; then
           mkdir -p "$(dirname "${baseline_path}")"
           health_args+=(--baseline "${baseline_path}" --write-baseline "${baseline_path}")
         fi
-        if [[ -n "${ZOTIO_FAIL_ON_NEW}" ]]; then
+        if [[ -n "${ZOTIO_FAIL_ON_NEW}" && "${report_supported}" == "1" ]]; then
           health_args+=(--fail-on-new "${ZOTIO_FAIL_ON_NEW}")
         fi
 
