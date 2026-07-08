@@ -33,6 +33,44 @@ inputs:
     description: Zotero Web API key. Required on CI because runners have no Zotero desktop/local API or synced store.
     required: false
     default: ""
+  cache:
+    description: Cache the zotio store and health baseline in ~/.local/share/zotio with actions/cache. Set to false to disable.
+    required: false
+    default: "true"
+  baseline:
+    description: Persist a health baseline at ~/.local/share/zotio/health-baseline.json and report new/resolved findings.
+    required: false
+    default: "false"
+  fail-on-new:
+    description: Fail only on new findings at or above this severity (critical, high, or info). Implies baseline mode.
+    required: false
+    default: ""
+  manuscript:
+    description: Optional manuscript path to validate with zotio items bibcheck --fail-on-unknown after the health gate.
+    required: false
+    default: ""
+  # Requires workflow permission: pull-requests: write.
+  pr-comment:
+    description: Post or update a sticky bibliography-health verdict comment on pull requests.
+    required: false
+    default: "false"
+  # Requires workflow permission: issues: write.
+  open-issue-on:
+    description: Open a deduplicated issue for bibliography alerts. Supported values are retraction or new-critical; empty disables issue creation.
+    required: false
+    default: ""
+  badge-gist-id:
+    description: Gist ID to update with bibliography-badge.json after the gate. Requires badge-path and gist-token.
+    required: false
+    default: ""
+  gist-token:
+    description: Personal access token with gist scope used to update badge-gist-id. github.token cannot write gists.
+    required: false
+    default: ""
+  github-token:
+    description: GitHub token used by PR comment and issue automation.
+    required: false
+    default: ${{ github.token }}
 
 outputs:
   exit-code:
@@ -44,6 +82,9 @@ outputs:
   color:
     description: Badge color keyword (empty unless badge-path is set).
     value: ${{ steps.gate.outputs.color }}
+  new-findings:
+    description: Count of findings new since the baseline (empty unless baseline mode is enabled).
+    value: ${{ steps.gate.outputs.new-findings }}
 runs:
   using: composite
   steps:
@@ -189,6 +230,15 @@ runs:
         echo "${tool_dir}" >> "${GITHUB_PATH}"
         echo "Installed zotio ${version} for ${goos}/${goarch}."
 
+    - name: Cache zotio store
+      if: ${{ inputs.cache != 'false' }}
+      uses: actions/cache@v4
+      with:
+        path: ~/.local/share/zotio
+        key: zotio-store-${{ runner.os }}-${{ github.run_id }}
+        restore-keys: |
+          zotio-store-${{ runner.os }}-
+
     - name: Sync Zotero library
       shell: bash
       env:
@@ -207,19 +257,40 @@ runs:
         ZOTIO_BADGE_PATH: ${{ inputs['badge-path'] }}
         ZOTIO_CHECK_RETRACTIONS: ${{ inputs['check-retractions'] }}
         ZOTIO_EXTRA_ARGS: ${{ inputs['extra-args'] }}
+        ZOTIO_BASELINE_INPUT: ${{ inputs.baseline }}
+        ZOTIO_FAIL_ON_NEW: ${{ inputs['fail-on-new'] }}
+        ZOTIO_MANUSCRIPT: ${{ inputs.manuscript }}
       run: |
-        set -euo pipefail
+        set -uo pipefail
+
+        report_path="${RUNNER_TEMP}/zotio-health-report.json"
+        baseline_path="${HOME}/.local/share/zotio/health-baseline.json"
+        printf 'ZOTIO_HEALTH_REPORT=%s\n' "${report_path}" >> "${GITHUB_ENV}"
+        printf 'ZOTIO_BADGE_PATH=%s\n' "${ZOTIO_BADGE_PATH}" >> "${GITHUB_ENV}"
 
         if command -v python3 >/dev/null 2>&1; then
           PYTHON=python3
         elif command -v python >/dev/null 2>&1; then
           PYTHON=python
         else
-          echo "::error::python3 (or python) is required to parse extra-args." >&2
-          exit 9
+          echo "::error::python3 (or python) is required to parse extra-args and health reports." >&2
+          {
+            echo "exit-code=9"
+            echo "message="
+            echo "color="
+            echo "new-findings="
+          } >> "${GITHUB_OUTPUT}"
+          {
+            echo "ZOTIO_HEALTH_STATUS=9"
+            echo "ZOTIO_BIBCHECK_STATUS=0"
+          } >> "${GITHUB_ENV}"
+          exit 0
         fi
 
-        health_args=(library health --for "${ZOTIO_HEALTH_FOR}" --fail-on "${ZOTIO_FAIL_ON}")
+        health_args=(library health --for "${ZOTIO_HEALTH_FOR}" --fail-on "${ZOTIO_FAIL_ON}" --report "${report_path}")
+        health_status=0
+        bibcheck_status=0
+        input_error=""
 
         check_retractions="$(printf '%s' "${ZOTIO_CHECK_RETRACTIONS}" | tr '[:upper:]' '[:lower:]')"
         case "${check_retractions}" in
@@ -227,12 +298,35 @@ runs:
           false|"") ;;
           *)
             echo "::error::check-retractions must be 'true' or 'false', got '${ZOTIO_CHECK_RETRACTIONS}'." >&2
-            exit 2
+            health_status=2
+            input_error=1
             ;;
         esac
 
+        baseline_mode=false
+        baseline_input="$(printf '%s' "${ZOTIO_BASELINE_INPUT}" | tr '[:upper:]' '[:lower:]')"
+        case "${baseline_input}" in
+          true) baseline_mode=true ;;
+          false|"") ;;
+          *)
+            echo "::error::baseline must be 'true' or 'false', got '${ZOTIO_BASELINE_INPUT}'." >&2
+            health_status=2
+            input_error=1
+            ;;
+        esac
+        if [[ -n "${ZOTIO_FAIL_ON_NEW}" ]]; then
+          baseline_mode=true
+        fi
+        if [[ "${baseline_mode}" == "true" ]]; then
+          mkdir -p "$(dirname "${baseline_path}")"
+          health_args+=(--baseline "${baseline_path}" --write-baseline "${baseline_path}")
+        fi
+        if [[ -n "${ZOTIO_FAIL_ON_NEW}" ]]; then
+          health_args+=(--fail-on-new "${ZOTIO_FAIL_ON_NEW}")
+        fi
+
         extra_args=()
-        if [[ -n "${ZOTIO_EXTRA_ARGS}" ]]; then
+        if [[ -n "${ZOTIO_EXTRA_ARGS}" && -z "${input_error}" ]]; then
           extra_file="${RUNNER_TEMP}/zotio-extra-args.bin"
           if ! "${PYTHON}" - "${extra_file}" <<'PY'
         import os
@@ -251,20 +345,27 @@ runs:
         PY
           then
             echo "::error::Could not parse extra-args. Use shell-style quoting, for example: --require-fresh 24h --limit 20" >&2
-            exit 2
+            health_status=2
+            input_error=1
+          else
+            while IFS= read -r -d '' arg; do
+              extra_args+=("${arg}")
+            done < "${extra_file}"
           fi
-          while IFS= read -r -d '' arg; do
-            extra_args+=("${arg}")
-          done < "${extra_file}"
         fi
 
-        status=0
-        if [[ -n "${ZOTIO_BADGE_PATH}" ]]; then
-          mkdir -p "$(dirname "${ZOTIO_BADGE_PATH}")"
-          zotio "${health_args[@]}" --badge "${extra_args[@]}" > "${ZOTIO_BADGE_PATH}" || status=$?
-          echo "Wrote shields.io endpoint badge JSON to ${ZOTIO_BADGE_PATH}."
-        else
-          zotio "${health_args[@]}" "${extra_args[@]}" || status=$?
+        if [[ -z "${input_error}" ]]; then
+          if [[ -n "${ZOTIO_BADGE_PATH}" ]]; then
+            mkdir -p "$(dirname "${ZOTIO_BADGE_PATH}")"
+            zotio "${health_args[@]}" --badge "${extra_args[@]}" > "${ZOTIO_BADGE_PATH}" || health_status=$?
+            echo "Wrote shields.io endpoint badge JSON to ${ZOTIO_BADGE_PATH}."
+          else
+            zotio "${health_args[@]}" "${extra_args[@]}" || health_status=$?
+          fi
+        fi
+
+        if [[ -n "${ZOTIO_MANUSCRIPT}" ]]; then
+          zotio items bibcheck "${ZOTIO_MANUSCRIPT}" --fail-on-unknown || bibcheck_status=$?
         fi
 
         message=""
@@ -274,32 +375,418 @@ runs:
           color="$("${PYTHON}" -c 'import json,sys; print(json.load(open(sys.argv[1])).get("color",""))' "${ZOTIO_BADGE_PATH}" 2>/dev/null || true)"
         fi
 
+        new_findings=""
+        if [[ "${baseline_mode}" == "true" && -s "${report_path}" ]]; then
+          new_findings="$("${PYTHON}" - "${report_path}" <<'PY' 2>/dev/null || true
+        import json
+        import sys
+
+        with open(sys.argv[1], "r", encoding="utf-8") as fh:
+            report = json.load(fh)
+        baseline = report.get("baseline") or {}
+        new = baseline.get("new")
+        print(len(new) if isinstance(new, list) else "")
+        PY
+          )"
+        fi
+
+        if [[ -s "${report_path}" ]]; then
+          "${PYTHON}" - "${report_path}" <<'PY' || true
+        import json
+        import sys
+
+        LIMIT = 20
+
+        def as_text(value):
+            if value is None:
+                return ""
+            if isinstance(value, (str, int, float, bool)):
+                return str(value)
+            return json.dumps(value, sort_keys=True)
+
+        def escape_command(value):
+            return as_text(value).replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+
+        def first(mapping, *keys):
+            for key in keys:
+                if isinstance(mapping, dict) and mapping.get(key) not in (None, ""):
+                    return mapping.get(key)
+            return ""
+
+        def flatten_findings(report):
+            findings = report.get("findings")
+            if isinstance(findings, list):
+                return findings
+            out = []
+            for value in report.values():
+                if isinstance(value, dict):
+                    nested = value.get("findings")
+                    if isinstance(nested, list):
+                        out.extend(nested)
+            return out
+
+        with open(sys.argv[1], "r", encoding="utf-8") as fh:
+            report = json.load(fh)
+
+        emitted = 0
+        truncated = 0
+        for finding in flatten_findings(report):
+            if not isinstance(finding, dict):
+                continue
+            severity = as_text(first(finding, "severity", "level")).lower()
+            if severity == "critical":
+                command = "error"
+            elif severity == "high":
+                command = "warning"
+            else:
+                continue
+            if emitted >= LIMIT:
+                truncated += 1
+                continue
+            kind = first(finding, "kind", "type", "check")
+            item = first(finding, "item", "item_key", "itemKey", "key")
+            title = first(finding, "title", "item_title", "itemTitle", "message")
+            detail = first(finding, "message", "detail", "description")
+            summary = " — ".join(part for part in [as_text(kind), as_text(item), as_text(title)] if part)
+            body = detail if detail else summary
+            print(f"::{command} title={escape_command(summary or severity)}::{escape_command(body)}")
+            emitted += 1
+        if truncated:
+            print(f"::notice::zotio emitted {LIMIT} finding annotations and suppressed {truncated} more.")
+        PY
+        fi
+
         {
-          echo "exit-code=${status}"
+          echo "exit-code=${health_status}"
           echo "message=${message}"
           echo "color=${color}"
+          echo "new-findings=${new_findings}"
         } >> "${GITHUB_OUTPUT}"
+        {
+          echo "ZOTIO_HEALTH_STATUS=${health_status}"
+          echo "ZOTIO_BIBCHECK_STATUS=${bibcheck_status}"
+          echo "ZOTIO_NEW_FINDINGS=${new_findings}"
+        } >> "${GITHUB_ENV}"
 
-        case "${status}" in
+        case "${health_status}" in
           0)  verdict="passed" ;;
           9)  verdict="setup required (exit 9)" ;;
           11) verdict="FAILED — findings at or above the threshold (exit 11)" ;;
           12) verdict="FAILED — library data too stale (exit 12)" ;;
-          *)  verdict="FAILED (exit ${status})" ;;
+          *)  verdict="FAILED (exit ${health_status})" ;;
         esac
+        if [[ "${bibcheck_status}" == "0" ]]; then
+          manuscript_verdict="passed"
+        else
+          manuscript_verdict="FAILED (exit ${bibcheck_status})"
+        fi
+        gate_display="\`--fail-on ${ZOTIO_FAIL_ON}\`"
+        if [[ -n "${ZOTIO_FAIL_ON_NEW}" ]]; then
+          gate_display="${gate_display}<br>\`--fail-on-new ${ZOTIO_FAIL_ON_NEW}\`"
+        fi
         {
           echo "## Bibliography health: ${verdict}"
           echo
           echo "| | |"
           echo "|---|---|"
           echo "| Preset | \`${ZOTIO_HEALTH_FOR}\` |"
-          echo "| Gate | \`--fail-on ${ZOTIO_FAIL_ON}\` |"
+          echo "| Gate | ${gate_display} |"
           echo "| Retraction check | \`${check_retractions:-false}\` |"
+          if [[ "${baseline_mode}" == "true" ]]; then
+            echo "| New since baseline | ${new_findings:-unknown} |"
+          fi
+          if [[ -n "${ZOTIO_MANUSCRIPT}" ]]; then
+            echo "| Manuscript | ${manuscript_verdict} — \`${ZOTIO_MANUSCRIPT}\` |"
+          fi
           if [[ -n "${message}" ]]; then
             echo "| Verdict | ${message} |"
           fi
           echo
+          if [[ -n "${ZOTIO_MANUSCRIPT}" ]]; then
+            echo "Manuscript check: ${manuscript_verdict}."
+            echo
+          fi
           echo "Reproduce locally: \`zotio library health --for ${ZOTIO_HEALTH_FOR} --fail-on ${ZOTIO_FAIL_ON}\` — [docs](https://orgmentem.github.io/zotio/guide/ci/)"
         } >> "${GITHUB_STEP_SUMMARY}"
 
-        exit "${status}"
+    - name: Publish badge to gist
+      if: ${{ always() && inputs['badge-gist-id'] != '' }}
+      shell: bash
+      env:
+        ZOTIO_BADGE_GIST_ID: ${{ inputs['badge-gist-id'] }}
+        ZOTIO_GIST_TOKEN: ${{ inputs['gist-token'] }}
+        ZOTIO_BADGE_PATH: ${{ inputs['badge-path'] }}
+      run: |
+        set -euo pipefail
+        if [[ -z "${ZOTIO_GIST_TOKEN}" ]]; then
+          echo "::error::badge-gist-id requires gist-token. Use a PAT with gist scope; github.token cannot update gists." >&2
+          exit 2
+        fi
+        if [[ -z "${ZOTIO_BADGE_PATH}" ]]; then
+          echo "::error::badge-gist-id requires badge-path so the badge JSON exists before publishing." >&2
+          exit 2
+        fi
+        if [[ ! -s "${ZOTIO_BADGE_PATH}" ]]; then
+          echo "::error::Badge file '${ZOTIO_BADGE_PATH}' does not exist or is empty; cannot publish gist badge." >&2
+          exit 9
+        fi
+        if ! command -v python3 >/dev/null 2>&1; then
+          echo "::error::python3 is required to encode the gist update payload." >&2
+          exit 9
+        fi
+        echo "::add-mask::${ZOTIO_GIST_TOKEN}"
+        payload_path="${RUNNER_TEMP}/zotio-gist-payload.json"
+        python3 - "${ZOTIO_BADGE_PATH}" "${payload_path}" <<'PY'
+        import json
+        import sys
+
+        with open(sys.argv[1], "r", encoding="utf-8") as fh:
+            badge = fh.read()
+        payload = {
+            "files": {
+                "bibliography-badge.json": {
+                    "content": badge,
+                },
+            },
+        }
+        with open(sys.argv[2], "w", encoding="utf-8") as fh:
+            json.dump(payload, fh)
+        PY
+        curl -sS -f -X PATCH \
+          -H "Authorization: Bearer ${ZOTIO_GIST_TOKEN}" \
+          -H "Accept: application/vnd.github+json" \
+          -H "X-GitHub-Api-Version: 2022-11-28" \
+          --data @"${payload_path}" \
+          "https://api.github.com/gists/${ZOTIO_BADGE_GIST_ID}" >/dev/null
+        echo "Published shields.io badge JSON to gist ${ZOTIO_BADGE_GIST_ID} as bibliography-badge.json."
+
+    - name: Comment on pull request
+      if: ${{ always() && inputs.pr-comment == 'true' && github.event_name == 'pull_request' }}
+      uses: actions/github-script@v7
+      env:
+        ZOTIO_HEALTH_FOR: ${{ inputs['for'] }}
+        ZOTIO_FAIL_ON: ${{ inputs['fail-on'] }}
+        ZOTIO_FAIL_ON_NEW: ${{ inputs['fail-on-new'] }}
+      with:
+        github-token: ${{ inputs['github-token'] }}
+        script: |
+          const fs = require('fs');
+          const marker = '<!-- zotio-action -->';
+
+          function readReport(path) {
+            if (!path || !fs.existsSync(path)) return {};
+            return JSON.parse(fs.readFileSync(path, 'utf8'));
+          }
+          function asText(value) {
+            if (value === undefined || value === null || value === '') return '';
+            if (typeof value === 'string') return value;
+            return JSON.stringify(value);
+          }
+          function first(object, names) {
+            for (const name of names) {
+              if (object && object[name] !== undefined && object[name] !== null && object[name] !== '') return object[name];
+            }
+            return '';
+          }
+          function flattenFindings(report) {
+            if (Array.isArray(report.findings)) return report.findings;
+            const out = [];
+            for (const value of Object.values(report)) {
+              if (value && typeof value === 'object' && Array.isArray(value.findings)) out.push(...value.findings);
+            }
+            return out;
+          }
+          function findingIdentity(finding) {
+            return asText(first(finding, ['identity', 'id', 'fingerprint'])) || [
+              first(finding, ['severity', 'level']),
+              first(finding, ['kind', 'type', 'check']),
+              first(finding, ['item', 'item_key', 'itemKey', 'key']),
+              first(finding, ['title', 'item_title', 'itemTitle', 'message']),
+            ].map(asText).join('|');
+          }
+          function row(label, value) {
+            return `| ${label} | ${value || ''} |`;
+          }
+          function verdict(status) {
+            switch (String(status || '0')) {
+              case '0': return 'passed';
+              case '9': return 'setup required (exit 9)';
+              case '11': return 'failed — findings at or above the threshold (exit 11)';
+              case '12': return 'failed — library data too stale (exit 12)';
+              default: return `failed (exit ${status})`;
+            }
+          }
+          function describeFinding(finding) {
+            const kind = asText(first(finding, ['kind', 'type', 'check'])) || 'finding';
+            const item = asText(first(finding, ['item', 'item_key', 'itemKey', 'key'])) || 'unknown item';
+            const title = asText(first(finding, ['title', 'item_title', 'itemTitle', 'message'])) || asText(first(finding, ['message', 'detail', 'description']));
+            return `- **${kind}** — \`${item}\`${title ? ` — ${title}` : ''}`;
+          }
+
+          const report = readReport(process.env.ZOTIO_HEALTH_REPORT);
+          const baseline = report.baseline && typeof report.baseline === 'object' ? report.baseline : {};
+          const newFindings = Array.isArray(baseline.new) ? baseline.new : [];
+          const allFindings = flattenFindings(report);
+          const criticalFindings = allFindings.filter((finding) => asText(first(finding, ['severity', 'level'])).toLowerCase() === 'critical');
+          const combined = [];
+          const seen = new Set();
+          for (const finding of [...newFindings, ...criticalFindings]) {
+            if (!finding || typeof finding !== 'object') continue;
+            const identity = findingIdentity(finding);
+            if (seen.has(identity)) continue;
+            seen.add(identity);
+            combined.push(finding);
+          }
+
+          const gate = process.env.ZOTIO_FAIL_ON_NEW
+            ? `--fail-on ${process.env.ZOTIO_FAIL_ON}; --fail-on-new ${process.env.ZOTIO_FAIL_ON_NEW}`
+            : `--fail-on ${process.env.ZOTIO_FAIL_ON}`;
+          const lines = [
+            marker,
+            '## Bibliography health',
+            '',
+            '| | |',
+            '|---|---|',
+            row('Gate result', verdict(process.env.ZOTIO_HEALTH_STATUS)),
+            row('Preset', `\`${asText(report.preset) || process.env.ZOTIO_HEALTH_FOR}\``),
+            row('Fail on', `\`${gate}\``),
+            row('New findings', process.env.ZOTIO_NEW_FINDINGS || (Array.isArray(baseline.new) ? String(newFindings.length) : '')),
+            '',
+          ];
+          if (combined.length > 0) {
+            lines.push('### New or critical findings', '');
+            lines.push(...combined.slice(0, 10).map(describeFinding));
+            if (combined.length > 10) lines.push(`- …and ${combined.length - 10} more.`);
+            lines.push('');
+          }
+
+          const body = lines.join('\n');
+          const { owner, repo } = context.repo;
+          const issue_number = context.payload.pull_request.number;
+          const comments = await github.paginate(github.rest.issues.listComments, {
+            owner,
+            repo,
+            issue_number,
+            per_page: 100,
+          });
+          const existing = comments.find((comment) => comment.body && comment.body.includes(marker));
+          if (existing) {
+            await github.rest.issues.updateComment({ owner, repo, comment_id: existing.id, body });
+          } else {
+            await github.rest.issues.createComment({ owner, repo, issue_number, body });
+          }
+
+    - name: Open bibliography alert issue
+      if: ${{ always() && inputs['open-issue-on'] != '' }}
+      uses: actions/github-script@v7
+      env:
+        ZOTIO_OPEN_ISSUE_ON: ${{ inputs['open-issue-on'] }}
+      with:
+        github-token: ${{ inputs['github-token'] }}
+        script: |
+          const fs = require('fs');
+          const crypto = require('crypto');
+
+          function readReport(path) {
+            if (!path || !fs.existsSync(path)) return {};
+            return JSON.parse(fs.readFileSync(path, 'utf8'));
+          }
+          function asText(value) {
+            if (value === undefined || value === null || value === '') return '';
+            if (typeof value === 'string') return value;
+            return JSON.stringify(value);
+          }
+          function first(object, names) {
+            for (const name of names) {
+              if (object && object[name] !== undefined && object[name] !== null && object[name] !== '') return object[name];
+            }
+            return '';
+          }
+          function flattenFindings(report) {
+            if (Array.isArray(report.findings)) return report.findings;
+            const out = [];
+            for (const value of Object.values(report)) {
+              if (value && typeof value === 'object' && Array.isArray(value.findings)) out.push(...value.findings);
+            }
+            return out;
+          }
+          function findingIdentity(finding) {
+            return asText(first(finding, ['identity', 'id', 'fingerprint'])) || [
+              first(finding, ['severity', 'level']),
+              first(finding, ['kind', 'type', 'check']),
+              first(finding, ['item', 'item_key', 'itemKey', 'key']),
+              first(finding, ['doi', 'DOI']),
+              first(finding, ['title', 'item_title', 'itemTitle', 'message']),
+            ].map(asText).join('|');
+          }
+          function detailLine(finding) {
+            const title = asText(first(finding, ['title', 'item_title', 'itemTitle', 'message'])) || 'Untitled item';
+            const item = asText(first(finding, ['item', 'item_key', 'itemKey', 'key']));
+            const doi = asText(first(finding, ['doi', 'DOI', 'item_doi', 'itemDoi']));
+            const noticeDoi = asText(first(finding, ['notice_doi', 'noticeDoi', 'retraction_notice_doi', 'retractionNoticeDoi']));
+            const parts = [`- **${title}**`];
+            if (item) parts.push(`  - Item: \`${item}\``);
+            if (doi) parts.push(`  - DOI: ${doi}`);
+            if (noticeDoi) parts.push(`  - Retraction notice DOI: ${noticeDoi}`);
+            return parts.join('\n');
+          }
+
+          const mode = process.env.ZOTIO_OPEN_ISSUE_ON;
+          if (!['retraction', 'new-critical'].includes(mode)) {
+            core.setFailed(`open-issue-on must be empty, retraction, or new-critical; got '${mode}'.`);
+            return;
+          }
+
+          const report = readReport(process.env.ZOTIO_HEALTH_REPORT);
+          const allFindings = flattenFindings(report);
+          const baseline = report.baseline && typeof report.baseline === 'object' ? report.baseline : {};
+          const baselineNew = Array.isArray(baseline.new) ? baseline.new : [];
+          const matches = mode === 'retraction'
+            ? allFindings.filter((finding) => asText(first(finding, ['kind', 'type', 'check'])) === 'retracted_item')
+            : baselineNew.filter((finding) => asText(first(finding, ['severity', 'level'])).toLowerCase() === 'critical');
+
+          if (matches.length === 0) return;
+
+          const identities = matches.map(findingIdentity).sort();
+          const hash = crypto.createHash('sha256').update(identities.join('\n')).digest('hex').slice(0, 16);
+          const marker = `<!-- zotio-action:${mode}:${hash} -->`;
+          const title = mode === 'retraction'
+            ? 'Bibliography alert: retracted paper cited'
+            : 'Bibliography alert: new critical bibliography finding';
+          const body = [
+            marker,
+            '',
+            `zotio found ${matches.length} ${mode === 'retraction' ? 'retracted citation' : 'new critical finding'}${matches.length === 1 ? '' : 's'} in the bibliography health report.`,
+            '',
+            ...matches.map(detailLine),
+            '',
+            `Report path in the workflow run: \`${process.env.ZOTIO_HEALTH_REPORT || ''}\``,
+          ].join('\n');
+
+          const { owner, repo } = context.repo;
+          const openIssues = await github.paginate(github.rest.issues.listForRepo, {
+            owner,
+            repo,
+            state: 'open',
+            per_page: 100,
+          });
+          const existing = openIssues.find((issue) => !issue.pull_request && (
+            (issue.body && issue.body.includes(marker)) || issue.title === title
+          ));
+          if (existing) return;
+
+          await github.rest.issues.create({ owner, repo, title, body });
+
+    - name: Enforce gate
+      if: ${{ always() }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        health_status="${ZOTIO_HEALTH_STATUS:-0}"
+        bibcheck_status="${ZOTIO_BIBCHECK_STATUS:-0}"
+        if [[ "${health_status}" != "0" ]]; then
+          exit "${health_status}"
+        fi
+        if [[ "${bibcheck_status}" != "0" ]]; then
+          exit 11
+        fi
