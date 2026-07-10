@@ -232,7 +232,7 @@ runs:
 
     - name: Cache zotio store
       if: ${{ inputs.cache != 'false' }}
-      uses: actions/cache@v4
+      uses: actions/cache@v6
       with:
         path: ~/.local/share/zotio
         key: zotio-store-${{ runner.os }}-${{ github.run_id }}
