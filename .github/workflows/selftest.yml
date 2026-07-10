@@ -15,7 +15,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Gate Zotero bibliography via local action
         id: health
@@ -49,7 +49,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Check out the action
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
 
       - name: Run without api-key (must fail with exit 9)
         id: nokey
