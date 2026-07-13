@@ -579,7 +579,7 @@ runs:
 
     - name: Comment on pull request
       if: ${{ always() && inputs.pr-comment == 'true' && github.event_name == 'pull_request' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         ZOTIO_HEALTH_FOR: ${{ inputs['for'] }}
         ZOTIO_FAIL_ON: ${{ inputs['fail-on'] }}
@@ -695,7 +695,7 @@ runs:
 
     - name: Open bibliography alert issue
       if: ${{ always() && inputs['open-issue-on'] != '' }}
-      uses: actions/github-script@v7
+      uses: actions/github-script@v9
       env:
         ZOTIO_OPEN_ISSUE_ON: ${{ inputs['open-issue-on'] }}
       with:
